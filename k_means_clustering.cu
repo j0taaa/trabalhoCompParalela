@@ -1,6 +1,8 @@
 /*
  GPU-enabled K-Means clustering (single-file)
  Save as k_means_clustering.cu
+ Compile: nvcc -O3 k_means_clustering.cu -o kmeans
+ Run: ./kmeans [size] [k]
 */
 
 #define _USE_MATH_DEFINES
@@ -10,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdint.h>
 
 #include <cuda_runtime.h>
 
@@ -26,7 +29,7 @@
         }                                                                   \
     } while (0)
 
-
+/* data structures */
 typedef struct observation
 {
     double x;
@@ -45,7 +48,7 @@ typedef struct cluster
 __host__ __device__ int calculateNearest(const observation* o,
                                          const cluster clusters[], int k);
 
-/* double atomic add for pre-sm_60 */
+/* Double atomic add for architectures without native atomicAdd(double) */
 __device__ inline double atomicAddDouble(double* address, double val)
 {
 #if __CUDA_ARCH__ >= 600
@@ -98,8 +101,8 @@ __global__ void finalize_clusters_kernel(cluster* clusters, int k)
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < k && clusters[idx].count > 0)
     {
-        clusters[idx].x /= clusters[idx].count;
-        clusters[idx].y /= clusters[idx].count;
+        clusters[idx].x /= (double)clusters[idx].count;
+        clusters[idx].y /= (double)clusters[idx].count;
     }
 }
 
@@ -158,8 +161,8 @@ cluster* kMeans(observation observations_host[], size_t size, int k)
             clusters_host[0].y += observations_host[i].y;
             observations_host[i].group = 0;
         }
-        clusters_host[0].x /= clusters_host[0].count;
-        clusters_host[0].y /= clusters_host[0].count;
+        clusters_host[0].x /= (double)clusters_host[0].count;
+        clusters_host[0].y /= (double)clusters_host[0].count;
         return clusters_host;
     }
     else if (k < (int)size)
@@ -340,9 +343,19 @@ void testP(size_t size, int k, double maxRadius)
 
 int main(int argc, char* argv[])
 {
+    /* optional args: [size] [k] */
+    size_t size = 1000000;
+    int k = 11;
+    if (argc > 1) size = (size_t)atoll(argv[1]);
+    if (argc > 2) k = atoi(argv[2]);
+
+    /* basic sanity checks */
+    if (k < 1) k = 1;
+    if (size < 1) size = 1;
+
     srand((unsigned int)time(NULL));
     clock_t start = clock();
-    testP(1000000, 11, 20.0); /* adjust size if you run out of GPU memory */
+    testP(size, k, 20.0);
     clock_t end = clock();
     double time_taken = ((double)(end - start)) / CLOCKS_PER_SEC;
     printf("Time taken: %f seconds\n", time_taken);
