@@ -22,7 +22,9 @@
 #include <stdlib.h>       /* rand */
 #include <string.h>       /* memset */
 #include <time.h>         /* time */
+/* PARALELIZAÇÃO: Incluído para medição de tempo de parede (wall clock time) */
 #include <sys/time.h>     /* gettimeofday */
+/* PARALELIZAÇÃO: Biblioteca OpenMP para paralelização com diretivas de compilador */
 #ifdef _OPENMP
 #include <omp.h>          /* OpenMP */
 #endif
@@ -158,15 +160,17 @@ cluster* kMeans(observation observations[], size_t size, int k)
          {
              observations[j].group = rand() % k;
          }
-        size_t changed = 0;
-         size_t minAcceptedError =
-             size /
-             10000;  // Do until 99.99 percent points are in correct cluster
-         do
-         {
-            changed = 0;
+       size_t changed = 0;
+        size_t minAcceptedError =
+            size /
+            10000;  // Do until 99.99 percent points are in correct cluster
+        do
+        {
+           changed = 0;
+/* PARALELIZAÇÃO: Início da região paralela OpenMP - cria equipe de threads */
 #pragma omp parallel
             {
+/* PARALELIZAÇÃO: Distribui iterações do loop entre threads para resetar clusters */
 #pragma omp for
                 for (int i = 0; i < k; i++)
                 {
@@ -175,8 +179,10 @@ cluster* kMeans(observation observations[], size_t size, int k)
                     clusters[i].count = 0;
                 }
 
+/* PARALELIZAÇÃO: Cada thread tem seu próprio array local para evitar race conditions */
                 cluster* local_clusters = (cluster*)calloc(k, sizeof(cluster));
 
+/* PARALELIZAÇÃO: Distribui observações entre threads - cada uma acumula em seu array local */
 #pragma omp for
                 for (size_t j = 0; j < size; j++)
                 {
@@ -186,6 +192,7 @@ cluster* kMeans(observation observations[], size_t size, int k)
                     local_clusters[clusterIndex].count++;
                 }
 
+/* PARALELIZAÇÃO: Seção crítica para combinar resultados locais no array global (evita race condition) */
 #pragma omp critical
                 {
                     for (int i = 0; i < k; i++)
@@ -196,10 +203,12 @@ cluster* kMeans(observation observations[], size_t size, int k)
                     }
                 }
 
+/* PARALELIZAÇÃO: Barreira para sincronizar threads antes de calcular médias */
 #pragma omp barrier
 
                 free(local_clusters);
 
+/* PARALELIZAÇÃO: Distribui cálculo das médias dos centroides entre threads */
 #pragma omp for
                 for (int i = 0; i < k; i++)
                 {
@@ -207,6 +216,7 @@ cluster* kMeans(observation observations[], size_t size, int k)
                     clusters[i].y /= clusters[i].count;
                 }
 
+/* PARALELIZAÇÃO: Distribui atribuição de clusters com reduction para somar 'changed' de todas threads */
 #pragma omp for reduction(+ : changed)
                 for (size_t j = 0; j < size; j++)
                 {
@@ -218,7 +228,7 @@ cluster* kMeans(observation observations[], size_t size, int k)
                     }
                 }
             }
-         } while (changed > minAcceptedError);  // Keep on grouping until we have
+        } while (changed > minAcceptedError);  // Keep on grouping until we have
                                                 // got almost best clustering
      }
      else
@@ -425,6 +435,9 @@ void testP(size_t size, int k, double maxRadius)
     free(clusters);
 }
 
+/* PARALELIZAÇÃO: Função para medir tempo de parede (wall clock time) em vez de tempo de CPU
+   Necessário porque clock() mede tempo de CPU total (soma de todas threads),
+   enquanto omp_get_wtime()/gettimeofday() mede tempo real decorrido */
 static double wall_time_seconds(void)
 {
 #ifdef _OPENMP
@@ -440,9 +453,11 @@ static double wall_time_seconds(void)
  * This function calls the test
  * function
  */
+/* PARALELIZAÇÃO: Main modificado para aceitar número de threads como argumento de linha de comando */
 int main(int argc, char* argv[])
 {
     srand(time(NULL));
+/* PARALELIZAÇÃO: Leitura do número de threads desejado via argumento */
     int requested_threads = 0;
     if (argc > 1)
     {
@@ -455,6 +470,7 @@ int main(int argc, char* argv[])
             requested_threads = 0;
         }
     }
+/* PARALELIZAÇÃO: Configuração do número de threads OpenMP e exibição de informações */
 #ifdef _OPENMP
     if (requested_threads > 0)
     {
@@ -468,6 +484,7 @@ int main(int argc, char* argv[])
         printf("OpenMP not enabled; ignoring requested thread count.\n");
     }
 #endif
+/* PARALELIZAÇÃO: Uso de wall_time_seconds() em vez de clock() para medir tempo real */
     double start = wall_time_seconds();
     testP(1000000, 11, 20.0);
     double end = wall_time_seconds();

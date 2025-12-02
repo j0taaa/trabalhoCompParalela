@@ -22,9 +22,13 @@
 #include <stdlib.h>       /* rand */
 #include <string.h>       /* memset */
 #include <time.h>         /* time */
+/* PARALELIZAÇÃO CUDA: Biblioteca de runtime CUDA para gerenciamento de memória e execução na GPU */
 #include <cuda_runtime.h> /* CUDA runtime */
+/* PARALELIZAÇÃO CUDA: Parâmetros de lançamento de kernels (blockIdx, threadIdx, etc.) */
 #include <device_launch_parameters.h>
 
+/* PARALELIZAÇÃO CUDA: Macro para verificação de erros em chamadas CUDA
+   Encapsula chamadas CUDA e verifica se houve erro, exibindo mensagem detalhada */
 #define CUDA_CALL(call)                                                     \
     do                                                                      \
     {                                                                       \
@@ -70,9 +74,13 @@
      size_t count; /**< count of observations present in this cluster */
  } cluster;
 
+/* PARALELIZAÇÃO CUDA: Declaração forward - __host__ __device__ permite execução em CPU e GPU */
 __host__ __device__ int calculateNearst(const observation* o,
                                         const cluster clusters[], int k);
 
+/* PARALELIZAÇÃO CUDA: Implementação de atomicAdd para double
+   Necessário porque atomicAdd nativo para double só existe em GPUs com compute capability >= 6.0
+   Usa compare-and-swap (CAS) para implementar operação atômica em GPUs mais antigas */
 __device__ inline double atomicAddDouble(double* address, double val)
 {
 #if __CUDA_ARCH__ >= 600
@@ -93,6 +101,8 @@ __device__ inline double atomicAddDouble(double* address, double val)
 #endif
 }
 
+/* PARALELIZAÇÃO CUDA: Kernel para resetar clusters - substitui loop sequencial
+   Cada thread reseta um cluster (paralelismo por cluster) */
 __global__ void reset_clusters_kernel(cluster* clusters, int k)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -104,6 +114,9 @@ __global__ void reset_clusters_kernel(cluster* clusters, int k)
     }
 }
 
+/* PARALELIZAÇÃO CUDA: Kernel para acumular coordenadas nos clusters - substitui loop STEP 2
+   Cada thread processa uma observação e usa operações atômicas para evitar race conditions
+   ao acumular valores no mesmo cluster de múltiplas threads simultaneamente */
 __global__ void accumulate_clusters_kernel(const observation* observations,
                                            cluster* clusters, size_t size,
                                            int k)
@@ -123,6 +136,8 @@ __global__ void accumulate_clusters_kernel(const observation* observations,
     }
 }
 
+/* PARALELIZAÇÃO CUDA: Kernel para calcular médias dos centroides - substitui loop de divisão
+   Cada thread calcula a média de um cluster (divide soma pelo count) */
 __global__ void finalize_clusters_kernel(cluster* clusters, int k)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -133,6 +148,9 @@ __global__ void finalize_clusters_kernel(cluster* clusters, int k)
     }
 }
 
+/* PARALELIZAÇÃO CUDA: Kernel para atribuir observações ao cluster mais próximo - substitui STEP 3 e 4
+   Cada thread processa uma observação, calcula cluster mais próximo e usa atomicAdd
+   para contar mudanças (equivalente à reduction do OpenMP) */
 __global__ void assign_clusters_kernel(observation* observations,
                                        const cluster* clusters, int k,
                                        size_t size, unsigned int* changed)
@@ -161,6 +179,8 @@ __global__ void assign_clusters_kernel(observation* observations,
   *
   * @returns the index of nearest centroid for given observation
   */
+/* PARALELIZAÇÃO CUDA: Função modificada com __host__ __device__ para executar em CPU e GPU
+   Permite reutilizar a mesma lógica nos kernels CUDA e no código host */
 __host__ __device__ int calculateNearst(const observation* o,
                                         const cluster clusters[], int k)
  {
@@ -250,19 +270,26 @@ __host__ __device__ int calculateNearst(const observation* o,
          {
              observations[j].group = rand() % k;
          }
-        observation* d_observations = NULL;
-        cluster* d_clusters = NULL;
-        unsigned int* d_changed = NULL;
+/* PARALELIZAÇÃO CUDA: Ponteiros para memória na GPU (device) - prefixo d_ indica device memory */
+       observation* d_observations = NULL;
+       cluster* d_clusters = NULL;
+       unsigned int* d_changed = NULL;
+/* PARALELIZAÇÃO CUDA: Configuração de grid e blocos para lançamento de kernels
+   threadsPerBlock: threads por bloco (256 é valor comum para boa ocupação)
+   clusterBlocks: blocos necessários para processar k clusters
+   observationBlocks: blocos necessários para processar todas observações */
         const int threadsPerBlock = 256;
         const int clusterBlocks =
             (k + threadsPerBlock - 1) / threadsPerBlock;
         const int observationBlocks =
             (int)((size + threadsPerBlock - 1) / threadsPerBlock);
 
+/* PARALELIZAÇÃO CUDA: Alocação de memória na GPU */
         CUDA_CALL(cudaMalloc((void**)&d_observations,
                              size * sizeof(observation)));
         CUDA_CALL(cudaMalloc((void**)&d_clusters, k * sizeof(cluster)));
         CUDA_CALL(cudaMalloc((void**)&d_changed, sizeof(unsigned int)));
+/* PARALELIZAÇÃO CUDA: Cópia dos dados de observações da CPU (Host) para GPU (Device) */
         CUDA_CALL(cudaMemcpy(d_observations, observations,
                              size * sizeof(observation),
                              cudaMemcpyHostToDevice));
@@ -273,23 +300,30 @@ __host__ __device__ int calculateNearst(const observation* o,
             10000;  // Do until 99.99 percent points are in correct cluster
         do
         {
+/* PARALELIZAÇÃO CUDA: Lançamento de kernel - sintaxe <<<blocos, threads>>> substitui loops sequenciais */
+/* PARALELIZAÇÃO CUDA: Reseta clusters (equivalente ao loop de inicialização no original) */
             reset_clusters_kernel<<<clusterBlocks, threadsPerBlock>>>(
                 d_clusters, k);
             CUDA_CALL(cudaGetLastError());
 
+/* PARALELIZAÇÃO CUDA: Acumula coordenadas nos clusters (equivalente ao STEP 2 no original) */
             accumulate_clusters_kernel<<<observationBlocks, threadsPerBlock>>>(
                 d_observations, d_clusters, size, k);
             CUDA_CALL(cudaGetLastError());
 
+/* PARALELIZAÇÃO CUDA: Calcula médias dos centroides (equivalente ao loop de divisão no original) */
             finalize_clusters_kernel<<<clusterBlocks, threadsPerBlock>>>(
                 d_clusters, k);
             CUDA_CALL(cudaGetLastError());
 
+/* PARALELIZAÇÃO CUDA: Reseta contador de mudanças na GPU */
             CUDA_CALL(cudaMemset(d_changed, 0, sizeof(unsigned int)));
+/* PARALELIZAÇÃO CUDA: Atribui observações aos clusters (equivalente ao STEP 3 e 4 no original) */
             assign_clusters_kernel<<<observationBlocks, threadsPerBlock>>>(
                 d_observations, d_clusters, k, size, d_changed);
             CUDA_CALL(cudaGetLastError());
 
+/* PARALELIZAÇÃO CUDA: Copia resultado de volta para CPU para verificar convergência */
             unsigned int iteration_changes = 0;
             CUDA_CALL(cudaMemcpy(&iteration_changes, d_changed,
                                  sizeof(unsigned int),
@@ -298,12 +332,14 @@ __host__ __device__ int calculateNearst(const observation* o,
         } while (changed > minAcceptedError);  // Keep on grouping until we have
                                                // got almost best clustering
 
+/* PARALELIZAÇÃO CUDA: Copia resultados finais de volta da GPU para CPU */
         CUDA_CALL(cudaMemcpy(observations, d_observations,
                              size * sizeof(observation),
                              cudaMemcpyDeviceToHost));
         CUDA_CALL(cudaMemcpy(clusters, d_clusters, k * sizeof(cluster),
                              cudaMemcpyDeviceToHost));
 
+/* PARALELIZAÇÃO CUDA: Libera memória alocada na GPU */
         CUDA_CALL(cudaFree(d_observations));
         CUDA_CALL(cudaFree(d_clusters));
         CUDA_CALL(cudaFree(d_changed));
